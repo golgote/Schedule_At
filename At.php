@@ -1,9 +1,9 @@
 <?php
 /* vim: set ts=4 sw=4: */
 // +----------------------------------------------------------------------+
-// | PHP Version 4                                                        |
+// | PHP Version 5                                                        |
 // +----------------------------------------------------------------------+
-// | Copyright (c) 1997-2002 The PHP Group                                |
+// | Copyright (c) 1997-2012 The PHP Group                                |
 // +----------------------------------------------------------------------+
 // | This source file is subject to version 2.0 of the PHP license,       |
 // | that is bundled with this package in the file LICENSE, and is        |
@@ -16,201 +16,194 @@
 // | Author: Colin Viebrock <colin@easydns.com>                           |
 // +----------------------------------------------------------------------+
 //
-// $Id: At.php,v 1.6.2.1 2002/04/09 19:04:25 ssb Exp $
-//
 // Interface to the UNIX "at" program
 
 /**
 * Class to interface to the UNIX "at" program
 *
 * @author Colin Viebrock <colin@easydns.com>
+* @author Bertrand Mansion <bmansion@mamasam.com>
 */
 
-require_once 'PEAR.php';
+class Schedule_At
+{
+	/**
+	* Path to at executable
+	* @var string
+	*/
+	protected $exec = '/usr/bin/at';
 
-class Schedule_At extends PEAR {
+	public $error      = false;
+	public $runtime    = false;
+	public $job        = false;
 
-	var $AT_PROG    = '/usr/bin/at';
-
-	var $error      = false;
-	var $runtime    = false;
-	var $job        = false;
-
-	var $lastexec   = '';
-
+	public $lastcmd    = '';
 
 	/**
 	* Constructor: instantiates the class.
-	*
+	* 
+	* @param  string 	Path to at executable
 	* @access public
 	*/
-	function Schedule_At()
+	public function __construct($exec = null)
 	{
-		$this->PEAR();
-		$this->_reset();
+		if (!empty($exec)) {
+			$this->exec = $exec;
+		}
+		$this->reset();
 	}
 
 
 	/**
 	* Adds an at command
-	*    This makes an "at" job, where $cmd is the shell command to run
-	*    and $timespec describes when the function should run.  See the
-	*    at man page for a description of the spec.
 	*
-	*    $queue is an optional 1 character string [a-zA-Z] that can define
-	*    which queue to put the job in.
+	* This makes an "at" job, where $cmd is the shell command to run
+	* and $timespec describes when the function should run.  See the
+	* at man page for a description of the spec.
 	*
-	*    If $mail is set, then an email will be sent when the job runs,
-	*    even if the job doesn't output anything.  The mail gets sent to
-	*    the user running the script (probably the webserver, i.e.
-	*    nobody@localhost).
+	* $queue is an optional 1 character string [a-zA-Z] that can define
+	* which queue to put the job in.
 	*
-	*    The add() method returns false on error (in which case, check
-	*    $at->error for the message), or the job number on success.
-	*    On succes, $at->runtime is also set with the timestamp corresponding
-	*    to when the job will run.
+	* If $mail is set, then an email will be sent when the job runs,
+	* even if the job doesn't output anything.  The mail gets sent to
+	* the user running the script (probably the webserver, i.e.
+	* nobody@localhost).
 	*
-	* @param $cmd        shell command
-	* @param $timespec   time when command should run, formatted accoring to the spec for at
-	* @param $queue      optional at queue specifier
-	* @param $mail       optional flag to specify whether to send email
+	* The add() method returns false on error (in which case, check
+	* $at->error for the message), or the job number on success.
+	* On success, $at->runtime is also set with the timestamp corresponding
+	* to when the job will run.
 	*
-	* @access public
+	* @param string 	shell command to run
+	* @param string 	timestamp when command should run
+	* @param string 	at queue specifier
+	* @param bool 		flag to specify whether to send email
 	*
+	* @return int|false  False on error or job number on success
 	*/
-	function add($cmd, $timespec, $queue = false, $mail = false )
+	public function add($cmd, $timespec, $queue = 'a', $mail = false)
 	{
+		$this->reset();
 
-		$this->_reset();
-
-		if ($queue && !preg_match('/^[a-zA-Z]{1,1}$/', $queue) ) {
-			return $this->raiseError('Invalid queue specification');
+		if (!strlen($cmd)) {
+			throw new Schedule_AtException('Invalid command specification');
 		}
 
-		$cmd = escapeShellCmd($cmd);
+		if ($queue && !preg_match('/^[a-zA-Z]$/', $queue)) {
+			throw new Schedule_AtException('Invalid queue specification');
+		}
 
-		$exec = sprintf("echo \"%s\" | %s %s %s %s 2>&1",
+		$time = strtotime($timespec);
+		if ($time === false) {
+			throw new Schedule_AtException('Invalid time specification');
+		}
+
+		$timespec = strftime('%y%m%d%H%M', $time); // Convert to Posix time format
+		$cmd = escapeshellcmd($cmd);
+
+		$exec = sprintf('echo "%s" | %s%s%s -t %s 2>&1',
 			addslashes($cmd),
-			$this->AT_PROG,
-			($queue ? '-q '.$queue : ''),
-			($mail ? '-m' : ''),
+			$this->exec,
+			($queue ? ' -q '.$queue : ''),
+			($mail ? ' -m' : ''),
 			$timespec
 		);
 
-		$result = $this->_doexec($exec);
+		$result = $this->execute($exec);
 
 		if (preg_match('/garbled time/i', $result) ) {
-			return $this->raiseError('Garbled time');
+			throw new Schedule_AtException('Invalid time specification');
 		}
 
 		if (preg_match('/job (\d+) at (.*)/i', $result, $m) ) {
-			$this->runtime = $this->_parsedate($m[2]);
-			$this->job = $m[1];
+			$this->runtime = strtotime($m[2]);
+			$this->job = (int)$m[1];
 			return $this->job;
 		} else {
-			return $this->raiseError('Exec Error: '.$result);
+			throw new Schedule_AtException('Exec error: '.$result);
 		}
 
 	}
 
 
 	/**
-	* Shows commands in the at queue
+	* Shows jobs in the at queue
 	*
-	*    This returns an array listing all queued jobs.  The array's keys
-	*    are the job numbers, and each entry is itself an associative array
-	*    listing the runtime (timestamp) and queue (char).
+	* This returns an array listing all queued jobs.  The array's keys
+	* are the job numbers, and each entry is itself an associative array
+	* listing the runtime (timestamp) and queue (char).
 	*
-	*    You can optionally provide a queue character to only list the jobs
-	*    in that queue.
+	* You can optionally provide a queue character to only list the jobs
+	* in that queue.
 	*
-	* @param $queue        optional queue specifier
-	*
-	* @access public
-	*
+	* @param string        optional queue specifier
 	*/
-	function show($queue = false)
+	public function queue($queue = null)
 	{
+		$this->reset();
 
-		$this->_reset();
-
-		if ($queue && !preg_match('/^[a-zA-Z]{1,1}$/', $queue) ) {
-			return $this->raiseError('Invalid queue specification');
+		if ($queue && !preg_match('/^[a-zA-Z]$/', $queue) ) {
+			throw new Schedule_AtException('Invalid queue specification');
 		}
 
-		$exec = sprintf("%s -l %s",
-			$this->AT_PROG,
-			($queue ? '-q '.$queue : '')
+		$exec = sprintf("%s -l%s",
+			$this->exec,
+			($queue ? ' -q '.$queue : '')
 		);
 
-		$result = $this->_doexec($exec);
+		$result = $this->execute($exec);
 		$lines = explode("\n", $result);
 
-		$return = array();
-
+		$jobs = array();
 		foreach($lines as $line) {
 			if (trim($line)) {
-				list($job, $day, $time, $queue) = preg_split('/\s+/', trim($line) );
-				$return[$job] = array(
-					'runtime'    => $this->_parsedate($day.' '.$time),
-					'queue'        => $queue
+				list($job, $date, $time, $queue) = preg_split('/\s+/', trim($line));
+				$jobs[$job] = array(
+					'runtime' => strtotime($date.' '.$time),
+					'queue'   => $queue
 				);
 			}
 		}
-
-		return $return;
-
+		return $jobs;
 	}
 
 
 	/**
 	* Remove job from the at queue
 	*
-	*    This removes jobs from the queue.  Returns false if the job doesn't
-	*    exist or on failure, or true on success.
+	* This removes jobs from the queue.  Returns false if the job doesn't
+	* exist or on failure, or true on success.
 	*
-	* @param $job        job to remove
-	*
-	* @access public
-	*
+	* @param int        job to remove
 	*/
-	function remove($job = false)
+	public function remove($job)
 	{
-		$this->_reset();
+		$this->reset();
 
-		if (!$job) {
-			return $this->raiseError('No job specified');
+		$queue = $this->queue();
+
+		if (!isset($queue[$job])) {
+			return false;
 		}
 
-		$queue = $this->show();
-
-		if (!isset($queue[$job]) ) {
-			return $this->raiseError('Job ' . $job . ' does not exist');
-		}
-
-		$exec = sprintf("%s -d %s",
-			$this->AT_PROG,
+		$exec = sprintf("%s -d %d",
+			$this->exec,
 			$job
 		);
 
-		$this->_doexec($exec);
+		$this->execute($exec);
 
 		/* this is required since the shell command doesn't return anything on success */
 
-		$queue = $this->show();
+		$queue = $this->queue();
 		return !isset($queue[$job]);
-
 	}
 
 
 	/**
-	* PRIVATE: Reset class
-	*
-	*
-	* @access private
-	*
+	* Reset class
 	*/
-	function _reset()
+	protected function reset()
 	{
 		$this->error      = false;
 		$this->runtime    = false;
@@ -220,35 +213,19 @@ class Schedule_At extends PEAR {
 
 
 	/**
-	* PRIVATE: Parse date string returned from shell command
+	* Run a shell command
 	*
-	* @param $str    date string to parse
-	*
-	* @access private
-	*
+	* @param string    command to run
 	*/
-	function _parsedate($str)
-	{
-		if (preg_match('/(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})/i', $str, $m) ) {
-			return mktime($m[4], $m[5], 0, $m[2], $m[3], $m[1]);
-		} else {
-			return false;
-		}
-	}
-
-
-	/**
-	* PRIVATE: Run a shell command
-	*
-	* @param $cmd    command to run
-	*
-	* @access private
-	*
-	*/
-	function _doexec($cmd)
+	protected function execute($cmd)
 	{
 		$this->lastexec = $cmd;
-		return `$cmd`;
+		return shell_exec($cmd);
 	}
+
+}
+
+class Schedule_AtException extends Exception
+{
 
 }
